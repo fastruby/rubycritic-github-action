@@ -34,4 +34,10 @@ class MarkdownTest < Minitest::Test
     assert_includes body, 'a \\| b'
     assert_includes body, '(was: has approx 12 statements)'
   end
+
+  def test_summary_counts_inline_findings
+    f = finding
+    body = M.summary(base_score: 1, head_score: 1, findings: [f], listed: [])
+    assert_includes body, '1 commented inline on the diff.'
+  end
 end

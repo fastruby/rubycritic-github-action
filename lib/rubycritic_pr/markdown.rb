@@ -52,8 +52,8 @@ module RubycriticPr
       value.positive? ? "+#{value}" : value.to_s
     end
 
-    # all_count: every finding. listed: findings shown in the table (the ones
-    # not already posted inline). note: optional extra line.
+    # findings: every finding. listed: findings shown in the table; the rest
+    # were commented inline. note: optional extra line.
     def summary(base_score:, head_score:, findings:, listed:, run_url: nil, note: nil)
       diff = (head_score - base_score).round(2)
       out = +"#{SUMMARY_MARKER}\n## RubyCritic report\n\n"
@@ -64,6 +64,8 @@ module RubycriticPr
              else
                "**#{findings.size}** new or worsened smell#{'s' unless findings.size == 1} in this PR.\n"
              end
+      inline = findings.size - listed.size
+      out << "\n#{inline} commented inline on the diff.\n" if inline.positive?
       out << "\n#{note}\n" if note
       unless listed.empty?
         out << "\n| Location | Type | Finding |\n|---|---|---|\n"
