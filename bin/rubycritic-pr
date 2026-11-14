@@ -1,0 +1,17 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require_relative '../lib/rubycritic_pr'
+
+client = RubycriticPr::GithubClient.new(
+  token: ENV.fetch('GITHUB_TOKEN'),
+  repo: ENV.fetch('GITHUB_REPOSITORY'),
+  api_url: ENV.fetch('GITHUB_API_URL', 'https://api.github.com')
+)
+
+begin
+  RubycriticPr::Runner.new(env: ENV, client: client).call
+rescue RubycriticPr::Report::MissingReport => e
+  puts "::error::#{RubycriticPr::Annotations.escape_data(e.message)}"
+  exit 2
+end

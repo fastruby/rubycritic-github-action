@@ -1,0 +1,147 @@
+name: 'RubyCritic PR Comments'
+description: 'Run RubyCritic in compare mode and comment on the smells a pull request introduced.'
+author: 'FastRuby.io'
+branding:
+  icon: 'alert-triangle'
+  color: 'red'
+
+inputs:
+  base-branch:
+    description: 'Branch to compare against. Defaults to the PR base ref.'
+    required: false
+    default: ''
+  paths:
+    description: 'Paths to analyze.'
+    required: false
+    default: '.'
+  threshold:
+    description: 'Fail if the score drops by more than this. Unset means no threshold.'
+    required: false
+    default: ''
+  rubycritic-version:
+    description: 'RubyCritic gem version to install. Defaults to the latest.'
+    required: false
+    default: ''
+  use-bundle:
+    description: 'Run through the project bundle (RubyCritic must be in the Gemfile and bundle installed).'
+    required: false
+    default: 'false'
+  inline-comments:
+    description: 'Post inline review comments on lines in the PR diff.'
+    required: false
+    default: 'true'
+  fail-on-new-smells:
+    description: 'Fail the job if the PR introduces any new smell.'
+    required: false
+    default: 'false'
+  upload-artifact:
+    description: 'Upload the RubyCritic reports as a workflow artifact.'
+    required: false
+    default: 'true'
+  github-token:
+    description: 'Token used to post comments.'
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  base-score:
+    description: 'RubyCritic score on the base branch.'
+    value: ${{ steps.report.outputs.base-score }}
+  head-score:
+    description: 'RubyCritic score on the PR head.'
+    value: ${{ steps.report.outputs.head-score }}
+  score-diff:
+    description: 'Head score minus base score.'
+    value: ${{ steps.report.outputs.score-diff }}
+  new-smells-count:
+    description: 'Number of new or worsened smells.'
+    value: ${{ steps.report.outputs.new-smells-count }}
+
+runs:
+  using: composite
+  steps:
+    - name: Prepare branches
+      id: prepare
+      shell: bash
+      env:
+        INPUT_BASE: ${{ inputs.base-branch }}
+        EVENT_BASE: ${{ github.base_ref }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        set -euo pipefail
+        base="${INPUT_BASE:-$EVENT_BASE}"
+        if [ -z "$base" ]; then
+          echo "::error::No base branch. Run on pull_request or set the base-branch input."
+          exit 1
+        fi
+        head_sha="${HEAD_SHA:-$(git rev-parse HEAD)}"
+        git fetch --no-tags origin "+refs/heads/${base}:refs/remotes/origin/${base}"
+        # Compare against the merge base so changes that landed on the base
+        # branch after this PR branched are not reported as the PR's changes.
+        git branch -f rubycritic-base "$(git merge-base "origin/${base}" "$head_sha")"
+        git checkout -q -B rubycritic-head "$head_sha"
+        echo "report-root=${RUNNER_TEMP}/rubycritic" >> "$GITHUB_OUTPUT"
+
+    - name: Install RubyCritic
+      if: inputs.use-bundle != 'true'
+      shell: bash
+      env:
+        VERSION: ${{ inputs.rubycritic-version }}
+      run: |
+        if [ -n "$VERSION" ]; then
+          gem install rubycritic --no-document -v "$VERSION"
+        else
+          gem install rubycritic --no-document
+        fi
+
+    - name: Run RubyCritic
+      id: rubycritic
+      shell: bash
+      env:
+        PATHS: ${{ inputs.paths }}
+        THRESHOLD: ${{ inputs.threshold }}
+        USE_BUNDLE: ${{ inputs.use-bundle }}
+        REPORT_ROOT: ${{ steps.prepare.outputs.report-root }}
+      run: |
+        cmd=(rubycritic)
+        [ "$USE_BUNDLE" = "true" ] && cmd=(bundle exec rubycritic)
+        args=(-b rubycritic-base -f json -f html --no-browser -p "$REPORT_ROOT")
+        [ -n "$THRESHOLD" ] && args+=(-t "$THRESHOLD")
+        # A threshold failure exits non-zero. Record it and keep going so the
+        # findings still get reported. The job fails in the last step.
+        set +e
+        # shellcheck disable=SC2086
+        "${cmd[@]}" "${args[@]}" $PATHS
+        echo "exit-code=$?" >> "$GITHUB_OUTPUT"
+        exit 0
+
+    - name: Report findings
+      id: report
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        RC_BASE_BRANCH: rubycritic-base
+        RC_HEAD_BRANCH: rubycritic-head
+        RC_REPORT_ROOT: ${{ steps.prepare.outputs.report-root }}
+        RC_EXIT_CODE: ${{ steps.rubycritic.outputs.exit-code }}
+        RC_THRESHOLD: ${{ inputs.threshold }}
+        RC_INLINE_COMMENTS: ${{ inputs.inline-comments }}
+        RC_FAIL_ON_NEW_SMELLS: ${{ inputs.fail-on-new-smells }}
+      run: ruby "${{ github.action_path }}/bin/rubycritic-pr"
+
+    - name: Upload reports
+      if: always() && inputs.upload-artifact == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: rubycritic-report
+        path: ${{ steps.prepare.outputs.report-root }}
+        if-no-files-found: ignore
+
+    - name: Fail if needed
+      if: always() && steps.report.outputs.fail-reason != ''
+      shell: bash
+      env:
+        REASON: ${{ steps.report.outputs.fail-reason }}
+      run: |
+        echo "::error title=RubyCritic::${REASON}"
+        exit 1
